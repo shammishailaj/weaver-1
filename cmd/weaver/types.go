@@ -9,8 +9,13 @@ import (
 	"strings"
 )
 
+type filters struct {
+	Pid uint32
+}
+
 type functionTraceContext struct {
 	binaryName   string
+	Filters      filters
 	FunctionName string
 	HasArguments bool       // used for parsing text template
 	Arguments    []argument `json:",omitempty"`
@@ -24,6 +29,8 @@ type argument struct {
 	PrintfFormat   string
 	TypeSize       int
 	ArrayLength    int // Set as 0 if not array
+	IsSlice        bool
+	IsPointer      bool
 }
 
 type procInfo struct {
@@ -74,9 +81,9 @@ const (
 	STRING
 	BYTE
 	RUNE
+	POINTER
 	//TODO:
 	STRUCT
-	POINTER
 )
 
 var goTypeToSizeInBytes = map[goType]int{
@@ -96,9 +103,9 @@ var goTypeToSizeInBytes = map[goType]int{
 	BYTE:    1,
 	RUNE:    4,
 	STRING:  8,
-	//TODO:
-	STRUCT:  8,
 	POINTER: 8,
+	//TODO:
+	STRUCT: 8,
 }
 
 var goToCType = map[goType]string{
@@ -118,9 +125,9 @@ var goToCType = map[goType]string{
 	BYTE:    "char",
 	STRING:  "char *",
 	RUNE:    "int",
-	//TODO:
-	STRUCT:  "void *",
 	POINTER: "void *",
+	//TODO:
+	STRUCT: "void *",
 }
 
 func stringfFormat(t goType) string {
@@ -147,28 +154,6 @@ func stringfFormat(t goType) string {
 	}
 }
 
-var stringToGoType = map[string]goType{
-	"INT":     INT,
-	"INT8":    INT8,
-	"INT16":   INT16,
-	"INT32":   INT32,
-	"INT64":   INT64,
-	"UINT":    UINT,
-	"UINT8":   UINT8,
-	"UINT16":  UINT16,
-	"UINT32":  UINT32,
-	"UINT64":  UINT64,
-	"FLOAT32": FLOAT32,
-	"FLOAT64": FLOAT64,
-	"BOOL":    BOOL,
-	"STRING":  STRING,
-	"BYTE":    BYTE,
-	"RUNE":    RUNE,
-	//TODO:
-	"STRUCT":  STRUCT,
-	"POINTER": POINTER,
-}
-
 var goTypeToString = map[goType]string{
 	INT:     "INT",
 	INT8:    "INT8",
@@ -186,9 +171,9 @@ var goTypeToString = map[goType]string{
 	STRING:  "STRING",
 	BYTE:    "BYTE",
 	RUNE:    "RUNE",
-	//TODO:
-	STRUCT:  "STRUCT",
 	POINTER: "POINTER",
+	//TODO:
+	STRUCT: "STRUCT",
 }
 
 var supportedTypes = []string{
@@ -208,6 +193,7 @@ var supportedTypes = []string{
 	"STRING",
 	"BYTE",
 	"RUNE",
+	"POINTER",
 }
 
 func listAvailableTypes() {
@@ -264,7 +250,10 @@ func parseFunctionAndArgumentTypes(context *functionTraceContext, funcAndArgs st
 			var arg argument
 			argumentNumber += 1
 			arg.VariableName = fmt.Sprintf("argument%d", argumentNumber)
-			populateArgumentValues(parseStack, &arg)
+			err := populateArgumentValues(parseStack, &arg)
+			if err != nil {
+				return err
+			}
 			context.Arguments = append(context.Arguments, arg)
 
 			if funcAndArgs[i] == ',' {
@@ -288,7 +277,17 @@ func parseFunctionAndArgumentTypes(context *functionTraceContext, funcAndArgs st
 
 func populateArgumentValues(parseStack *stack, arg *argument) error {
 
-	if strings.Contains(parseStack.string(), "[") {
+	if strings.Contains(parseStack.string(), "[]") {
+		goType, err := parseSliceString(parseStack.string())
+		if err != nil {
+			return err
+		}
+
+		arg.IsSlice = true
+		arg.goType = goType
+		arg.PrintfFormat = stringfFormat(goType)
+		arg.CType = goToCType[goType]
+	} else if strings.Contains(parseStack.string(), "[") {
 		length, goType, err := parseArrayString(parseStack.string())
 		if err != nil {
 			return err
@@ -297,8 +296,13 @@ func populateArgumentValues(parseStack *stack, arg *argument) error {
 		arg.goType = goType
 		arg.PrintfFormat = stringfFormat(goType)
 		arg.CType = goToCType[goType]
+	} else if strings.HasPrefix(parseStack.string(), "*") {
+		goType := POINTER
+		arg.goType = goType
+		arg.PrintfFormat = stringfFormat(goType)
+		arg.CType = goToCType[goType]
 	} else {
-		goType := stringToGoType[strings.ToUpper(parseStack.string())]
+		goType := stringToGoType(parseStack.string())
 		if goType == INVALID {
 			return fmt.Errorf("invalid go type: %s", parseStack.string())
 		}
@@ -327,10 +331,58 @@ func parseArrayString(s string) (int, goType, error) {
 
 	}
 
-	gotype := stringToGoType[strings.ToUpper(subs[1])]
+	gotype := stringToGoType(subs[1])
 	if gotype == INVALID {
 		return -1, INVALID, errors.New("malformed array type")
 	}
 
 	return length, gotype, nil
+}
+
+func parseSliceString(s string) (goType, error) {
+	subs := strings.Split(s, "]")
+	if len(subs) != 2 && subs[0] != "[" {
+		return INVALID, errors.New("malformed array parameter")
+	}
+
+	goType := stringToGoType(subs[1])
+	if goType == INVALID {
+		return INVALID, errors.New("malformed slice type")
+	}
+
+	return goType, nil
+}
+
+func stringToGoType(typeString string) goType {
+
+	typeString = strings.ToUpper(typeString)
+
+	var stringToGoType = map[string]goType{
+		"INT":     INT,
+		"INT8":    INT8,
+		"INT16":   INT16,
+		"INT32":   INT32,
+		"INT64":   INT64,
+		"UINT":    UINT,
+		"UINT8":   UINT8,
+		"UINT16":  UINT16,
+		"UINT32":  UINT32,
+		"UINT64":  UINT64,
+		"FLOAT32": FLOAT32,
+		"FLOAT64": FLOAT64,
+		"BOOL":    BOOL,
+		"STRING":  STRING,
+		"BYTE":    BYTE,
+		"RUNE":    RUNE,
+		"POINTER": POINTER,
+		//TODO:
+		"STRUCT": STRUCT,
+	}
+
+	if strings.HasPrefix(typeString, "*") {
+		return POINTER
+	}
+
+	return stringToGoType[typeString]
+
 }

@@ -32,9 +32,11 @@ bin/tester: cmd/tester
 # unit tests
 test:
 > go test -v ./cmd/weaver/...
+.PHONY: test
 
 smoke-test: tests/run_smoke_test.sh
 > sh -c "tests/run_smoke_test.sh"
+.PHONY: test
 
 clean:
 > rm -f ./bin/*
@@ -44,7 +46,8 @@ clean:
 help:
 > @echo  "Targets:"
 > @echo  "    default - bin/*"
-> @echo  "    test - (REQUIRES ROOT) run smoke tests"
+> @echo  "    test - run unit tests"
+> @echo  "    smoke-test - (REQUIRES ROOT) run smoke tester"
 > @echo  "    bin/weaver - build weaver cli to ./bin/weaver"
 > @echo  "    bin/tester - build tester program used in test target to ./bin/tester"
 > @echo  "    bin/print-stack - build print-stack cli which traces a particular function by printing the first 25 bytes the stack on function enter to ./bin/print-stack"
